@@ -8,6 +8,7 @@ from sqlalchemy.ext.asyncio import AsyncSession
 from .. import models
 from ..database import session
 from ..exceptions import ClientError
+from ..gate import analyze_contract
 from ..logging_config import get_logger
 from ..schemas import (
     PolicyCreate,
@@ -29,7 +30,25 @@ def _to_out(p: models.Policy) -> PolicyOut:
         draft_rules=p.draft_rules,
         draft_revision=p.draft_revision,
         current_revision=p.current_revision,
+        contract_id=p.contract_id,
+        contract_revision=p.contract_revision,
     )
+
+
+async def _require_contract_version(
+    db: AsyncSession, contract_id: uuid.UUID, contract_revision: int
+) -> models.ContractVersion:
+    version = await db.get(
+        models.ContractVersion,
+        {"contract_id": contract_id, "revision": contract_revision},
+    )
+    if version is None:
+        raise ClientError(
+            "CONTRACT_VERSION_NOT_FOUND",
+            "contract version not found",
+            status_code=404,
+        )
+    return version
 
 
 @router.post("", response_model=PolicyOut, status_code=201)
@@ -41,7 +60,16 @@ async def create_policy(
     except ValueError as exc:
         raise ClientError("INVALID_RULES", str(exc), status_code=400) from exc
 
-    policy = models.Policy(name=body.name, draft_rules=rules, draft_revision=0)
+    if body.contract_id is not None:
+        await _require_contract_version(db, body.contract_id, body.contract_revision)
+
+    policy = models.Policy(
+        name=body.name,
+        draft_rules=rules,
+        draft_revision=0,
+        contract_id=body.contract_id,
+        contract_revision=body.contract_revision,
+    )
     db.add(policy)
     await db.commit()
     await db.refresh(policy)
@@ -82,6 +110,12 @@ async def update_draft(
                 "draft was modified concurrently; refetch and retry",
                 status_code=409,
             )
+        if body.contract_id is not None:
+            await _require_contract_version(
+                db, body.contract_id, body.contract_revision
+            )
+            policy.contract_id = body.contract_id
+            policy.contract_revision = body.contract_revision
         policy.draft_rules = rules
         policy.draft_revision += 1
 
@@ -122,6 +156,34 @@ async def publish(
             raise ClientError(
                 "INVALID_RULES", str(exc), status_code=400
             ) from exc
+
+        # 发布门禁：策略绑定契约时，在发布事务内静态分析待发布规则。
+        # 分析为纯函数：不执行转换、不保存业务数据；失败则整体回滚。
+        if policy.contract_id is not None:
+            contract_version = await _require_contract_version(
+                db, policy.contract_id, policy.contract_revision
+            )
+            violations = analyze_contract(
+                contract_version.schema_doc, frozen_rules
+            )
+            if violations:
+                logger.warning(
+                    "request_failed",
+                    error_code="CONTRACT_GATE_FAILED",
+                    http_status=422,
+                    policy_id=str(policy_id),
+                    version=f"{policy.contract_id}@{policy.contract_revision}",
+                )
+                raise ClientError(
+                    "CONTRACT_GATE_FAILED",
+                    "policy rules do not satisfy the bound compliance contract",
+                    status_code=422,
+                    details={
+                        "contract_id": str(policy.contract_id),
+                        "contract_revision": policy.contract_revision,
+                        "violations": violations,
+                    },
+                )
 
         new_revision = policy.current_revision + 1
         db.add(

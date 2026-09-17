@@ -1,7 +1,10 @@
 """ORM 模型。
 
-policy            策略主体，保存可变草稿（draft_rules / draft_revision）
+policy            策略主体，保存可变草稿（draft_rules / draft_revision）与
+                  可选的合规契约绑定（contract_id / contract_revision）
 policy_version    不可变发布版本（revision CAS）
+contract          合规契约主体（current_revision 单调递增）
+contract_version  不可变契约版本（受限 JSON Schema，只增不改）
 idempotency_record 版本内幂等键：只存输入摘要与最终响应，不存任何原始值
 audit_event       审计：仅安全字段
 """
@@ -43,6 +46,11 @@ class Policy(Base):
     current_revision: Mapped[int] = mapped_column(
         Integer, nullable=False, default=0
     )
+    # 可选的合规契约绑定（不可变契约版本）；绑定后发布须通过门禁静态分析
+    contract_id: Mapped[uuid.UUID | None] = mapped_column(
+        UUID(as_uuid=True), nullable=True
+    )
+    contract_revision: Mapped[int | None] = mapped_column(Integer, nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
@@ -66,6 +74,47 @@ class PolicyVersion(Base):
     revision: Mapped[int] = mapped_column(Integer, primary_key=True)
     rules: Mapped[list] = mapped_column(JSONB, nullable=False)
     published_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+
+
+class Contract(Base):
+    __tablename__ = "contract"
+
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, default=uuid.uuid4
+    )
+    name: Mapped[str] = mapped_column(String(128), nullable=False)
+    # 当前契约版本号；创建时即写入 revision 1
+    current_revision: Mapped[int] = mapped_column(
+        Integer, nullable=False, default=1
+    )
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=func.now(), nullable=False
+    )
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True),
+        server_default=func.now(),
+        onupdate=func.now(),
+        nullable=False,
+    )
+
+
+class ContractVersion(Base):
+    """不可变契约版本：只插入、不更新；查询永不改写历史版本。"""
+
+    __tablename__ = "contract_version"
+    __table_args__ = (UniqueConstraint("contract_id", "revision"),)
+
+    contract_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("contract.id", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    revision: Mapped[int] = mapped_column(Integer, primary_key=True)
+    # 受限 JSON Schema 文档（对象或布尔），JSONB 原样保存、永不改写
+    schema_doc: Mapped[dict | bool] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), server_default=func.now(), nullable=False
     )
 

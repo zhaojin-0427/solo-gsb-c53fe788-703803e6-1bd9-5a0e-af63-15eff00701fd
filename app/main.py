@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from .api import contracts as contracts_api
 from .api import policies, transform as transform_api
 from .config import settings
 from .database import engine
@@ -26,6 +27,19 @@ async def lifespan(app: FastAPI):
                 await conn.execute(text("SELECT 1"))
                 # 幂等建表（内部系统、单服务部署；正式演进可接入 Alembic）
                 await conn.run_sync(Base.metadata.create_all)
+                # 既有部署的幂等列迁移（create_all 不会修改已存在的表）
+                await conn.execute(
+                    text(
+                        "ALTER TABLE policy "
+                        "ADD COLUMN IF NOT EXISTS contract_id UUID"
+                    )
+                )
+                await conn.execute(
+                    text(
+                        "ALTER TABLE policy "
+                        "ADD COLUMN IF NOT EXISTS contract_revision INTEGER"
+                    )
+                )
             break
         except Exception as exc:  # 数据库容器可能尚未就绪
             last_err = exc
@@ -51,6 +65,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     register_exception_handlers(app)
     app.include_router(policies.router)
+    app.include_router(contracts_api.router)
     app.include_router(transform_api.router)
 
     @app.get("/health", tags=["meta"])

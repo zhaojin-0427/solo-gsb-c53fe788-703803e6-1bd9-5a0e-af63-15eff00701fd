@@ -4,7 +4,7 @@ import re
 import uuid
 from typing import Any, Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 from . import pathlang
 
@@ -58,6 +58,9 @@ class PolicyCreate(BaseModel):
 
     name: str = Field(min_length=1, max_length=128)
     rules: list[RuleIn] = Field(default_factory=list)
+    # 可选：绑定不可变契约版本，绑定后发布须经门禁静态分析
+    contract_id: uuid.UUID | None = None
+    contract_revision: int | None = Field(default=None, ge=1)
 
     @field_validator("name")
     @classmethod
@@ -66,6 +69,12 @@ class PolicyCreate(BaseModel):
             raise ValueError("name allows [A-Za-z0-9_\\-.:] up to 128 chars")
         return v
 
+    @model_validator(mode="after")
+    def _check_contract_pair(self):
+        if (self.contract_id is None) != (self.contract_revision is None):
+            raise ValueError("contract_id and contract_revision must be set together")
+        return self
+
 
 class PolicyDraftUpdate(BaseModel):
     model_config = ConfigDict(extra="forbid")
@@ -73,6 +82,15 @@ class PolicyDraftUpdate(BaseModel):
     # 乐观锁：必须等于当前 draft_revision
     expected_draft_revision: int = Field(ge=0)
     rules: list[RuleIn]
+    # 可选：同时变更契约绑定（两个字段必须同时提供；不提供则保持原绑定）
+    contract_id: uuid.UUID | None = None
+    contract_revision: int | None = Field(default=None, ge=1)
+
+    @model_validator(mode="after")
+    def _check_contract_pair(self):
+        if (self.contract_id is None) != (self.contract_revision is None):
+            raise ValueError("contract_id and contract_revision must be set together")
+        return self
 
 
 class PolicyPublish(BaseModel):
@@ -88,12 +106,51 @@ class PolicyOut(BaseModel):
     draft_rules: list[dict]
     draft_revision: int
     current_revision: int
+    contract_id: uuid.UUID | None = None
+    contract_revision: int | None = None
 
 
 class PolicyVersionOut(BaseModel):
     policy_id: uuid.UUID
     revision: int
     rules: list[dict]
+
+
+class ContractCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=128)
+    # JSON 字段名为 "schema"（pydantic 保留名，故用别名）
+    schema_doc: dict | bool = Field(alias="schema")
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        if not _NAME_RE.fullmatch(v):
+            raise ValueError("name allows [A-Za-z0-9_\\-.:] up to 128 chars")
+        return v
+
+
+class ContractVersionCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    # 追加版本 CAS：必须等于当前契约版本号
+    expected_revision: int = Field(ge=0)
+    schema_doc: dict | bool = Field(alias="schema")
+
+
+class ContractOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    current_revision: int
+
+
+class ContractVersionOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    contract_id: uuid.UUID
+    revision: int
+    schema_doc: dict | bool = Field(alias="schema", serialization_alias="schema")
 
 
 class TransformRequest(BaseModel):

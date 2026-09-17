@@ -15,6 +15,7 @@ from typing import Any
 ALLOWED_EXTRA_KEYS = {
     "request_id",
     "policy_id",
+    "contract_id",
     "version",
     "input_digest",
     "error_code",

@@ -48,9 +48,16 @@ def _install_stubs():
 
         return deco
 
+    def model_validator(*args, **kwargs):
+        def deco(fn):
+            return fn
+
+        return deco
+
     pydantic.BaseModel = _BaseModel
     pydantic.Field = Field
     pydantic.field_validator = field_validator
+    pydantic.model_validator = model_validator
 
     def _literal(cls, *args):
         return cls
@@ -88,7 +95,13 @@ if __name__ == "__main__":
     # 显式加载纯逻辑模块，避免 import errors.py
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for mod in ("tests.test_jcs", "tests.test_pathlang", "tests.test_engine"):
+    for mod in (
+        "tests.test_jcs",
+        "tests.test_pathlang",
+        "tests.test_engine",
+        "tests.test_contractschema",
+        "tests.test_gate",
+    ):
         suite.addTests(loader.loadTestsFromName(mod))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)

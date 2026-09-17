@@ -35,10 +35,10 @@ def register_exception_handlers(app: FastAPI) -> None:
             error_code=exc.code,
             http_status=exc.status_code,
         )
-        return JSONResponse(
-            status_code=exc.status_code,
-            content=_envelope(exc.code, exc.message, request.state.request_id),
-        )
+        content = _envelope(exc.code, exc.message, request.state.request_id)
+        if exc.details is not None:
+            content["error"]["details"] = exc.details
+        return JSONResponse(status_code=exc.status_code, content=content)
 
     @app.exception_handler(RequestValidationError)
     async def validation_handler(request: Request, exc: RequestValidationError):

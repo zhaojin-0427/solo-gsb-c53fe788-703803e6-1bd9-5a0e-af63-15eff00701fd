@@ -241,6 +241,209 @@ async def main() -> None:
         uuidlib.UUID(r.headers["x-request-id"])
         print("invalid request id replaced OK")
 
+        # ---------------- 合规契约与发布门禁 ----------------
+        # 非法契约 schema：不支持的关键字 -> 422
+        r = await ac.post(
+            "/v1/contracts",
+            json={"name": "c-bad", "schema": {"type": "string", "pattern": "^a"}},
+        )
+        assert r.status_code == 422, r.text
+        assert r.json()["error"]["code"] == "CONTRACT_SCHEMA_INVALID"
+        # 循环引用 -> 422（分析必须终止）
+        r = await ac.post(
+            "/v1/contracts",
+            json={
+                "name": "c-cyc",
+                "schema": {
+                    "$defs": {"a": {"properties": {"n": {"$ref": "#/$defs/a"}}}},
+                    "$ref": "#/$defs/a",
+                },
+            },
+        )
+        assert r.status_code == 422, r.text
+        assert r.json()["error"]["code"] == "CONTRACT_SCHEMA_INVALID"
+        print("invalid contract schemas rejected OK")
+
+        # 合法契约 -> 201，revision 1
+        contract_schema = {
+            "$schema": "https://json-schema.org/draft/2020-12/schema",
+            "type": "object",
+            "properties": {
+                "user": {
+                    "type": "object",
+                    "properties": {
+                        "name": {
+                            "type": "string",
+                            "x-redaction": {"actions": ["mask"]},
+                        },
+                        "tax_id": {
+                            "type": ["string", "number"],
+                            "x-redaction": {"actions": ["tokenize"]},
+                        },
+                    },
+                    "required": ["name"],
+                }
+            },
+        }
+        r = await ac.post(
+            "/v1/contracts", json={"name": "c1", "schema": contract_schema}
+        )
+        assert r.status_code == 201, r.text
+        cid = r.json()["id"]
+        assert r.json()["current_revision"] == 1
+        print("contract created:", cid)
+
+        # 追加版本 CAS：错误期望 -> 409；正确 -> revision 2
+        r = await ac.post(
+            f"/v1/contracts/{cid}/versions",
+            json={"expected_revision": 5, "schema": {"type": "object"}},
+        )
+        assert r.status_code == 409, r.text
+        r = await ac.post(
+            f"/v1/contracts/{cid}/versions",
+            json={"expected_revision": 1, "schema": {"type": "object"}},
+        )
+        assert r.status_code == 201, r.text
+        assert r.json()["revision"] == 2
+        assert r.json()["schema"] == {"type": "object"}
+
+        # 历史版本不可变：v1 仍是原 schema
+        r = await ac.get(f"/v1/contracts/{cid}/versions/1")
+        assert r.status_code == 200, r.text
+        assert r.json()["schema"] == contract_schema
+        r = await ac.get(f"/v1/contracts/{cid}/versions/2")
+        assert r.json()["schema"] == {"type": "object"}
+        r = await ac.get(f"/v1/contracts/{cid}/versions/99")
+        assert r.status_code == 404, r.text
+        assert r.json()["error"]["code"] == "CONTRACT_VERSION_NOT_FOUND"
+        print("contract versions immutable OK")
+
+        # 绑定契约创建策略（不存在的版本 -> 404）
+        r = await ac.post(
+            "/v1/policies",
+            json={
+                "name": "gated",
+                "rules": [],
+                "contract_id": cid,
+                "contract_revision": 99,
+            },
+        )
+        assert r.status_code == 404, r.text
+
+        r = await ac.post(
+            "/v1/policies",
+            json={
+                "name": "gated",
+                "rules": [
+                    {"id": "n1", "path": "$.user.name", "action": "mask",
+                     "keep_prefix": 1, "keep_suffix": 1},
+                ],
+                "contract_id": cid,
+                "contract_revision": 1,
+            },
+        )
+        assert r.status_code == 201, r.text
+        gpid = r.json()["id"]
+        assert r.json()["contract_id"] == cid
+        assert r.json()["contract_revision"] == 1
+
+        # 发布门禁：tax_id 未覆盖 -> 422 CONTRACT_GATE_FAILED，含最短路径与 witness
+        r = await ac.post(f"/v1/policies/{gpid}/publish", json={"expected_revision": 0})
+        assert r.status_code == 422, r.text
+        err = r.json()["error"]
+        assert err["code"] == "CONTRACT_GATE_FAILED"
+        details = err["details"]
+        assert details["contract_id"] == cid
+        assert details["contract_revision"] == 1
+        v = details["violations"][0]
+        assert v["kind"] == "uncovered", v
+        assert v["path"] == "$.user.tax_id", v
+        assert v["allowed_actions"] == ["tokenize"]
+        assert v["witness"] == {"user": {"name": "", "tax_id": ""}}, v
+        # 门禁失败不生成 revision
+        r = await ac.get(f"/v1/policies/{gpid}")
+        assert r.json()["current_revision"] == 0
+        print("publish gate 422 with violation details OK")
+
+        # 动作不符 -> 422 action_mismatch
+        r = await ac.put(
+            f"/v1/policies/{gpid}/draft",
+            json={
+                "expected_draft_revision": 0,
+                "rules": [
+                    {"id": "n1", "path": "$.user.name", "action": "mask"},
+                    {"id": "n2", "path": "$.user.tax_id", "action": "delete"},
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        r = await ac.post(f"/v1/policies/{gpid}/publish", json={"expected_revision": 0})
+        assert r.status_code == 422, r.text
+        v = r.json()["error"]["details"]["violations"][0]
+        assert v["kind"] == "action_mismatch", v
+        assert v["effective_action"] == "delete"
+        assert [x["id"] for x in v["rules"]] == ["n2"]
+        print("action mismatch violation OK")
+
+        # 前序规则遮蔽 -> 422 shadowed
+        r = await ac.put(
+            f"/v1/policies/{gpid}/draft",
+            json={
+                "expected_draft_revision": 1,
+                "rules": [
+                    {"id": "n1", "path": "$.user.name", "action": "mask"},
+                    {"id": "n2", "path": "$.user.tax_id", "action": "delete"},
+                    {"id": "n3", "path": "$.user.tax_id", "action": "tokenize"},
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        r = await ac.post(f"/v1/policies/{gpid}/publish", json={"expected_revision": 0})
+        assert r.status_code == 422, r.text
+        v = r.json()["error"]["details"]["violations"][0]
+        assert v["kind"] == "shadowed", v
+        assert [x["id"] for x in v["rules"]] == ["n2", "n3"]
+        print("shadowed violation OK")
+
+        # 全部覆盖 -> 发布成功
+        r = await ac.put(
+            f"/v1/policies/{gpid}/draft",
+            json={
+                "expected_draft_revision": 2,
+                "rules": [
+                    {"id": "n1", "path": "$.user.name", "action": "mask",
+                     "keep_prefix": 1, "keep_suffix": 1},
+                    {"id": "n2", "path": "$.user.tax_id", "action": "tokenize"},
+                ],
+            },
+        )
+        assert r.status_code == 200, r.text
+        r = await ac.post(f"/v1/policies/{gpid}/publish", json={"expected_revision": 0})
+        assert r.status_code == 201, r.text
+        assert r.json()["revision"] == 1
+        print("publish gate pass OK")
+
+        # 绑定契约的策略发布后转换正常
+        r = await ac.post(
+            f"/v1/policies/{gpid}/transform",
+            json={
+                "idempotency_key": "gated-1",
+                "revision": 1,
+                "document": {"user": {"name": "alice", "tax_id": 123}},
+            },
+        )
+        assert r.status_code == 200, r.text
+        assert r.json()["result"]["user"]["name"] == "a***e"
+        print("gated policy transform OK")
+
+        # 无绑定策略发布不受门禁影响（既有行为）
+        r = await ac.post("/v1/policies", json={"name": "ungated", "rules": []})
+        assert r.status_code == 201, r.text
+        upid = r.json()["id"]
+        r = await ac.post(f"/v1/policies/{upid}/publish", json={"expected_revision": 0})
+        assert r.status_code == 201, r.text
+        print("ungated publish unaffected OK")
+
     # 回滚后同键重试：直接在事务里制造失败，验证占位不残留
     from sqlalchemy import select
     from sqlalchemy.ext.asyncio import async_sessionmaker
