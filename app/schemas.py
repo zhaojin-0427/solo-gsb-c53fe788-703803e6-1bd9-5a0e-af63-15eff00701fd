@@ -11,7 +11,6 @@ from . import pathlang
 _RULE_ID_RE = re.compile(r"[A-Za-z0-9_\-.:]{1,64}")
 _NAME_RE = re.compile(r"[A-Za-z0-9_\-.:]{1,128}")
 
-
 class RuleIn(BaseModel):
     model_config = ConfigDict(extra="forbid")
 
@@ -80,6 +79,10 @@ class PolicyPublish(BaseModel):
 
     # 发布 CAS：必须等于当前已发布 revision（首次发布为 0）
     expected_revision: int = Field(ge=0)
+    # 可选的发布门禁：携带后，规则集必须通过该不可变契约版本的静态分析。
+    # 两者必须同时提供；门禁通过后引用随 revision 一起冻结。
+    contract_id: uuid.UUID | None = None
+    contract_version: int | None = Field(default=None, ge=1)
 
 
 class PolicyOut(BaseModel):
@@ -94,6 +97,60 @@ class PolicyVersionOut(BaseModel):
     policy_id: uuid.UUID
     revision: int
     rules: list[dict]
+    contract_id: uuid.UUID | None = None
+    contract_version: int | None = None
+
+
+# ---------------------------------------------------------------------------
+# 合规契约
+# ---------------------------------------------------------------------------
+
+
+class ContractCreate(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    name: str = Field(min_length=1, max_length=128)
+    # 受限于 JSON Schema Draft 2020-12 子集；结构校验由 contracts 编译器完成
+    schema_: Any = Field(alias="schema", serialization_alias="schema")
+
+    @field_validator("name")
+    @classmethod
+    def _check_name(cls, v: str) -> str:
+        if not _NAME_RE.fullmatch(v):
+            raise ValueError("name allows [A-Za-z0-9_\\-.:] up to 128 chars")
+        return v
+
+
+class ContractDraftUpdate(BaseModel):
+    model_config = ConfigDict(extra="forbid", populate_by_name=True)
+
+    expected_draft_revision: int = Field(ge=0)
+    schema_: Any = Field(alias="schema", serialization_alias="schema")
+
+
+class ContractFreeze(BaseModel):
+    model_config = ConfigDict(extra="forbid")
+
+    # 契约版本 CAS：必须等于当前已冻结版本（首次冻结为 0）
+    expected_version: int = Field(ge=0)
+
+
+class ContractOut(BaseModel):
+    id: uuid.UUID
+    name: str
+    draft_schema: dict
+    draft_revision: int
+    current_version: int
+
+
+class ContractVersionOut(BaseModel):
+    model_config = ConfigDict(populate_by_name=True)
+
+    contract_id: uuid.UUID
+    version: int
+    schema_: dict = Field(
+        validation_alias="schema", serialization_alias="schema"
+    )
 
 
 class TransformRequest(BaseModel):

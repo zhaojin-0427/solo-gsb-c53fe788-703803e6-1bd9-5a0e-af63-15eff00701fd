@@ -17,14 +17,17 @@ __all__ = ["ClientError"]
 logger = get_logger(__name__)
 
 
-def _envelope(code: str, message: str, request_id: str | None):
-    return {
+def _envelope(code: str, message: str, request_id: str | None, details=None):
+    body = {
         "error": {
             "code": code,
             "message": message,
             "request_id": request_id,
         }
     }
+    if details is not None:
+        body["error"]["details"] = details
+    return body
 
 
 def register_exception_handlers(app: FastAPI) -> None:
@@ -37,7 +40,9 @@ def register_exception_handlers(app: FastAPI) -> None:
         )
         return JSONResponse(
             status_code=exc.status_code,
-            content=_envelope(exc.code, exc.message, request.state.request_id),
+            content=_envelope(
+                exc.code, exc.message, request.state.request_id, exc.details
+            ),
         )
 
     @app.exception_handler(RequestValidationError)

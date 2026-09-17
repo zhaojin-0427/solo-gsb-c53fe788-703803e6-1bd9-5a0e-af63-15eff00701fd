@@ -88,7 +88,13 @@ if __name__ == "__main__":
     # 显式加载纯逻辑模块，避免 import errors.py
     loader = unittest.TestLoader()
     suite = unittest.TestSuite()
-    for mod in ("tests.test_jcs", "tests.test_pathlang", "tests.test_engine"):
+    for mod in (
+        "tests.test_jcs",
+        "tests.test_pathlang",
+        "tests.test_engine",
+        "tests.test_contracts",
+        "tests.test_compliance",
+    ):
         suite.addTests(loader.loadTestsFromName(mod))
     result = unittest.TextTestRunner(verbosity=2).run(suite)
     sys.exit(0 if result.wasSuccessful() else 1)

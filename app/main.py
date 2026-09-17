@@ -4,6 +4,7 @@ from contextlib import asynccontextmanager
 from fastapi import FastAPI
 from sqlalchemy import text
 
+from .api import contracts as contracts_api
 from .api import policies, transform as transform_api
 from .config import settings
 from .database import engine
@@ -51,6 +52,7 @@ def create_app() -> FastAPI:
     app.add_middleware(RequestIDMiddleware)
     register_exception_handlers(app)
     app.include_router(policies.router)
+    app.include_router(contracts_api.router)
     app.include_router(transform_api.router)
 
     @app.get("/health", tags=["meta"])
